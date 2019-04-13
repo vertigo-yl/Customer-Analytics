@@ -1,0 +1,448 @@
+---
+title: Intuit Quickbooks Upgrade
+output: 
+  html_document:
+    code_folding: hide
+---
+
+* Team-lead GitLab id:10677111
+* Group number: 4
+* Group name: Group 4
+* Team member names:Jiamei Chen;Homa Rafieian Kouhpaei; Xinyan Zhang; Lu Yao
+
+```{r r_setup, include = FALSE}
+## initial settings
+knitr::opts_chunk$set(
+  comment = NA,
+  echo = TRUE,
+  error = TRUE,
+  cache = FALSE,
+  message = FALSE,
+  dpi = 144,
+  warning = FALSE
+)
+
+## width to use when printing tables etc.
+options(
+  width = 250,
+  scipen = 100,
+  max.print = 5000,
+  stringsAsFactors = FALSE
+)
+
+## load radiant packages if needed
+if (!exists("r_environment")) library(radiant)
+```
+
+<style>
+.table {
+  width: auto;
+}
+ul, ol {
+  padding-left: 18px;
+}
+pre, code, pre code {
+  overflow: auto;
+  white-space: pre;
+  word-wrap: normal;
+  background-color: #ffffff;
+}
+</style>
+
+## Setup
+
+Please complete this R-markdown document with your group by answering the questions in `intuit-quickbooks.pdf` on Dropbox (week6/readings/). Create an HTML file with all your results and comments and push both the Rmarkdown and HTML file to GitLab when your team is done. All results MUST be reproducible (i.e., the TA and I must be able to recreate the HTML from the Rmarkdown file without changes or errors). This means that you should NOT use any R-packages that are not part of the rsm-msba-spark docker container.
+
+This is the first group assignment for MGTA 455 and you will be using git and GitLab. If two people edit the same file at the same time you could get what is called a "merge conflict". git will not decide for you who's change to accept so the team-lead will have to determine which edits to use. To avoid merge conflicts, **always** click "pull" in Rstudio before you start working on a files. Then, when you are done, save and commit your changes, and then push them to GitLab. Make this a habit!
+
+If multiple people are going to work on the assignment at the same time I recommend you work on different files. You can use `source` to include R-code in your Rmarkdown document or include other R(markdown) documents into the main assignment file. 
+
+Group work-flow tips as discussed during ICT in Summer II are shown below:
+
+* Pull, edit, save, stage, commit, and push
+* Schedule who does what and when
+* Try to avoid working simultaneously on the same file 
+* If you are going to work simultaneously, do it in different files, e.g., 
+    - assignment1_john.R, assignment1_susan.R, assignment1_wei.R 
+    - assignment_1a.R, assignment_1b.R, assignment_1c.R
+* Use the `source` command to bring different pieces of code together into an Rmarkdown document or into an R-code file
+* Alternatively, use _child_ in Rmarkdown to include a part of a report
+* For (very) big projects use 'branches' to avoid conflicts (and stay on your branch)
+
+A graphical depiction of the group work-flow is shown below:
+
+![](images/git-group-workflow.png)
+
+Additional resource on the use of git are linked below:
+
+* http://happygitwithr.com
+* http://r-pkgs.had.co.nz/git.html
+* http://stackoverflow.com/questions/tagged/git or just a google search
+* https://try.github.io
+* https://www.manning.com/books/git-in-practice
+* https://github.com/GitInPractice/GitInPractice#readme
+
+
+```{r}
+## loading the data. Note that data must be loaded from Dropbox/MGTA455-2019/data
+intuit75k <- readr::read_rds(file.path(radiant.data::find_dropbox(), "MGTA455-2019/data/intuit75k.rds"))
+intuit75k$zip_bins <- as.factor(intuit75k$zip_bins )
+```
+
+## Methodology:
+At the beginning,  we divided the whole dataset into training set and testing set. We use the training set to train the models and use validation set to make predictions of wave-1 response data. Then we use half of every response rate in the wave-1  as the response rate in wave-2. According to the model results (mainly focused on the profits)  we got from validation data, we choose logistic regression adjusted with standard error as our best model, which result in profit of $XXX. To figure out the list of ID we suggest to mail,  we first  selected ID that did not respond to wave-1,  then find the ID we want based on the cumulative profit of deciles by selecting the top 66% customer.
+
+create training and validation date:
+```{r}
+training <- intuit75k %>% filter(training == 1)
+validation <- intuit75k %>% filter(training == 0)
+```
+
+## Create Models
+
+### RFM: 
+
+RFM is a method used for analyzing customer value. It stands for three dimensions: recency, frequency and monetary. RFM is used to find the best customers. In this model, with amount of breakeven, we can calculate response rate and use it as the probability of responding for each customer.
+
+```{r}
+intuit75k <- intuit75k %>%
+  mutate(rec_sq = xtile(last,5))
+
+intuit75k <- intuit75k %>%
+  group_by(rec_sq) %>%
+  mutate(freq_sq = xtile(numords,5, rev = TRUE)) %>%
+  ungroup()
+
+intuit75k <- intuit75k %>%
+  group_by(rec_sq, freq_sq) %>%
+  mutate(mon_sq = xtile(dollars,5, rev = TRUE)) %>%
+  ungroup()
+intuit75k$rfm_sq <- paste0(intuit75k$rec_sq, intuit75k$freq_sq, intuit75k$mon_sq)
+
+breakeven <- 1.41/60
+
+small <-intuit75k %>% filter(training==1) 
+big <-intuit75k %>% filter(training==0) 
+
+
+small <- small %>%
+  group_by(rfm_sq) %>%
+  mutate(mailto_sq = mean(res1 == 'Yes') > breakeven , exp_response_rate_sq = sum(res1 == "Yes")/n()) %>%
+  ungroup()
+
+index <- small %>% select(rfm_sq,exp_response_rate_sq,mailto_sq) %>% unique()
+big <- big %>% left_join(index)
+
+rfm_result <- big %>% select(id,exp_response_rate_sq,mailto_sq)
+```
+
+```{r}
+## calculate profit 
+performance <- data.frame(id = validation$id)
+performance  <- performance %>%
+  mutate(actual = validation$res1, prob_rfm = rfm_result$exp_response_rate_sq,mailto_rfm = rfm_result$mailto_sq)
+
+perc_mail_rfm <- mean(performance$mailto_rfm)
+dat <- filter(performance,mailto_rfm == TRUE)
+rep_rate_rfm <- mean(dat$actual== "Yes")
+
+cal_profit <- function(perc_mail,rep_rate,total_number){
+  nr_mail <- total_number * perc_mail
+  nr_resp <- nr_mail * rep_rate
+  mail_cost <- 1.41 * nr_mail
+  profit_logit <- 60 * nr_resp - mail_cost
+  ROME_logit <- profit_logit / mail_cost
+  result <- c(profit_logit,ROME_logit)
+  return(result)
+}
+
+result_rfm <- cal_profit(perc_mail_rfm,rep_rate_rfm,22500)
+
+```
+
+calculate profit:
+the expected profit is $33498, the expected ROME is 128%.
+
+### Naive Bayes:
+
+The naive bayes model divide customer characteristics from training data into several data categories, then find the probability of each customer will respond to the wave1 according to the probability of each characteristic.  
+
+
+```{r}
+result_nb <- nb(
+  training, 
+  rvar = "res1", 
+  evar = c(
+    "zip_bins", "sex", "bizflag", "numords", "dollars", "last", 
+    "sincepurch", "version1", "owntaxprod", "upgraded"
+  )
+)
+
+pred_nb<-predict(result_nb,pred_data=training)
+yes_nb<-pred_nb$Yes
+no_nb<-pred_nb$No
+training$yes_nb<-yes_nb
+training$no_nb<-no_nb
+training <- training %>%
+  mutate(mailto_nb= yes_nb> breakeven)
+
+pred_nb_validation<-predict(result_nb,pred_data=validation)
+yes_nb_validation<-pred_nb_validation$Yes
+no_nb_validation<-pred_nb_validation$No
+
+performance$prob_nb<-yes_nb_validation
+performance<- performance %>%
+  mutate(mailto_nb= prob_nb> breakeven)
+
+```
+
+calculation profit:
+the expected profit is $36939, the expected ROME is 260%.
+
+```{r}
+perc_mail_nb <- mean(performance$mailto_nb)
+dat_nb <- filter(performance, mailto_nb == TRUE)
+rep_rate_nb<- mean(dat_nb$actual== "Yes")
+result_nb <- cal_profit(perc_mail_nb,rep_rate_nb,22500)
+```
+
+
+### Logistic Model :
+
+First, we made the distribution graph for all the numeric and category variables in this dataset, and found that the distribution of *dollars* and *sincepurch* are not uniform, so we did the log transformation to it. We used all variables to build the stepwise logistic regression, then we found not all variables are significant, so we delete some variables like “sex”, “sincepurch”, “bizflag”,etc.Then built the final model.
+
+```{r}
+
+## transform variable
+training <- training %>%
+  mutate(dollars_ln = log(dollars),sincepurch_ln = log(sincepurch))
+validation <- validation %>%
+  mutate(dollars_ln = log(dollars),sincepurch_ln = log(sincepurch))
+mylist <- data.frame(col1 = seq(1,22500))
+## logistic model and 100 times loop 
+set.seed(1234)
+for(i in 1:100){
+  validation_list <- data.frame(col1 = seq(1,22500))
+  list <- sample_n(training,52500,replace = TRUE)
+  list <- list %>%
+  mutate(dollars_ln = log(dollars),sincepurch_ln = log(sincepurch))
+  result <- logistic(
+  list, 
+  rvar = "res1", 
+  evar = c(
+    "zip_bins", "numords", "last", "version1", "owntaxprod", 
+    "upgraded", "dollars_ln"
+  ), 
+  lev = "Yes", 
+)
+  pred <- predict(result, pred_data = validation, conf_lev = 0.9, se = TRUE)
+  validation_list <- store(validation_list, pred, name = "pred_logit")
+  mylist <- cbind(mylist,validation_list$pred_logit)
+}
+
+colnames(mylist) <- seq(0,100)
+mylist <- subset(mylist, select = -1 )
+
+for(i in 1:22500){
+  performance$prob_logit[i] <- quantile(mylist[i,],probs=0.05)
+}
+
+performance$prob_logit <- as.numeric(performance$prob_logit)
+
+```
+
+```{r}
+## calculate profit 
+performance <- performance %>%
+  mutate(mailto_logit = prob_logit > breakeven) 
+
+perc_mail_logit <- mean(performance$mailto_logit)
+dat <- filter(performance,mailto_logit == TRUE)
+rep_rate_logit <- mean(dat$actual == "Yes")
+result_logit <- cal_profit(perc_mail_logit,rep_rate_logit,22500)
+
+```
+calculate profit:
+the expected profit is $37271, the expected ROME is 216%.
+
+### Neural Networks: 
+
+In this model, we include all variables except the zip code and select a size of 3. 
+
+```{r}
+set.seed(1234)
+predict_matrix = matrix(data= 0,nrow = 22500)
+for (i in 1:100){
+  table = data.frame(sample_n(training,size=500,replace =TRUE))
+  result <- nn(
+              table, 
+              rvar = "res1", 
+              evar = c(
+                "zip_bins", "sex", "bizflag", "numords", "dollars", "last", 
+                "sincepurch", "version1", "owntaxprod", "upgraded"
+              ), 
+              lev = "Yes",
+              size = 3,
+              seed = 1234
+            )
+  pred <- predict(result, pred_data = validation)
+  nn_prediction <- c(pred$Prediction)
+  predict_matrix <- cbind(predict_matrix,nn_prediction)
+  }
+
+predict_matrix <- predict_matrix[,-1] # delete the benchmark column
+#str(predict_matrix)
+
+quantile_5_vector <-c()
+for (j in 1:22500){
+      row <- unname(predict_matrix[j,])
+      quantile_5_vector <- c(quantile_5_vector,unname(quantile(row,probs = 0.05)))}
+
+performance$prob_nn<-quantile_5_vector
+performance<- performance %>%
+  mutate(mailto_nn= prob_nn> breakeven)
+
+
+```
+
+calculation profit:
+the expected profit is $24595, the expected ROME is 350%.
+
+```{r}
+perc_mail_nn <- mean(performance$mailto_nn)
+dat_nn <- filter(performance, mailto_nn == TRUE)
+rep_rate_nn<- mean(dat_nn$actual== "Yes")
+result_nn <- cal_profit(perc_mail_nn,rep_rate_nn,22500)
+```
+
+
+## graph for profit and ROME
+
+```{r}
+## make a tibble (data.frame) with results
+intuit_results <- tibble::tibble(
+  name = c("RFM","Naive bayes","Logistic regression adjusted","Neural Network"),
+  Profit = c(result_rfm[1],result_nb[1],result_logit[1],result_nn[1]),
+  ROME = c(result_rfm[2],result_nb[2],result_logit[2],result_nn[2])
+) %>%
+  mutate(name = factor(name, levels = name))
+register("intuit_results")
+```
+
+```{r fig.width = 6, fig.height = 4}
+## plot campaign profit
+visualize(
+  intuit_results,
+  xvar = "name",
+  yvar = "Profit",
+  type = "bar",
+  labs = list(title = "Campaign profit", x = ""),
+  custom = TRUE
+) +
+  geom_text(aes(label = format_nr(Profit, dec = 0)), vjust = 2)
+```
+
+```{r fig.width = 6, fig.height = 4}
+## plot ROME
+visualize(
+  intuit_results,
+  xvar = "name",
+  yvar = "ROME",
+  type = "bar",
+  labs = list(title = "Return on Marketing Expenditures (ROME)", x = ""),
+  custom = TRUE
+) +
+  geom_text(aes(label = format_nr(ROME, dec = 2)), vjust = 2)
+```
+
+```{r fig.width = 7.54, fig.height = 21.54, dpi = 144}
+
+result <- evalbin(
+  performance, 
+  pred = c("prob_rfm", "prob_nb",'prob_logit','prob_nn'), 
+  rvar = "actual", 
+  lev = "Yes", 
+  cost = 1.41, 
+  margin = 60
+)
+#summary(result, prn = TRUE)
+plot(
+  result, 
+  plots = c("lift", "gains", "profit", "rome"), 
+  custom = FALSE
+)
+```
+
+```{r}
+result <- confusion(
+  performance, 
+  pred = c("prob_rfm", "prob_nb",'prob_logit','prob_nn'), 
+  rvar = "actual", 
+  lev = "Yes", 
+  cost = 1.41, 
+  margin = 60
+)
+summary(result)
+```
+
+From the results, the Logistic regression model adjusted with standard error should be our best model, with the highest profit ($ 37,272) and return on market expenditure (2.605). The lifts and gains of logistic model adjusted is the best.  Targeting only the top percentile of the customer in logistic regression model is expected to yield highest (about 3.8 times) the proportion of buyers compared to using ‘no model’. By using the logistic regression model adjusted, we can gain the highest percentage (about 37.6%) of buyers by targeting the same proportion (10%) of customers. The AUC for logistic regression model adjusted is also the largest, which is 0.754,  means highest accuracy. 
+
+
+```{r}
+performance_sub <- performance %>%
+  filter(actual == "No")%>%
+  mutate(dec_logit = xtile(prob_logit, 100, rev = TRUE))
+```
+
+```{r}
+table <- explore(
+  performance_sub, 
+  vars = "prob_logit", 
+  byvar = "dec_logit", 
+  fun = c("n_obs","mean"), 
+  nr = 100
+)
+#summary(table)
+# dtab(result) %>% render()
+```
+
+```{r}
+logit_table<- table$tab 
+logit_table<-logit_table%>%
+  mutate(res_num = n_obs * mean, profit = res_num *60 - n_obs*1.41, cum_profit = cumsum(profit)) 
+
+logit_table %>%  ggplot(aes(x=dec_logit,y=cum_profit,group=1)) + geom_line() + scale_x_discrete(breaks=seq(0, 100, 5))
+                                                                                                  
+first <- logit_table%>%
+  arrange(desc(cum_profit)) %>%
+  head(1)
+number <- as.numeric(first$dec_logit)
+
+final_id <- performance_sub%>%
+  filter(dec_logit<=number) %>%
+  select(id)
+final_id <- final_id %>% 
+  mutate(mailto_wave2=TRUE)
+```
+
+After choosing logit model as our final model, we use it to make predictions on the target customers. First, we filter all customers in the validation set that did not respond to wave 1 as a sub-validation set. And we calculate the probability of each person in the sub-validation set. In addition, we calculate the accumulated profit of these customers after ordering them from largest to lowest. And we find the max profit is achieved when we select only the largest 53% customers. Thus, we decided to target only these people to maximize our profit. 
+
+In the validation set of 22500 rows, we filter out the customers have bought the product(which res1 = 1) ,then we use logistic model with adjusted to predict the probability of each customer. Then we divide them into 100 deciles according to probability, with every decile we add in ,we calculate the cumulative profit and finally find the maximum profit is $23305.22 * 0.5 = $11652 when decile equal to 53%. When it comes to 801,821 people, the anticipated profit becomes $415258.
+
+
+To answer this question we need to interpret variables’ coefficients in our best model (Logit model). 
+Keeping all variables constant, one unit increase in number of orders increase the odds ratio by a factor of 1.285 (or 28.5 %).
+Keeping all variables constant, one month increase in last decrease the odds ratio 4.4%
+Keeping all variables constant, if the version is 1 increase the odds ratio by a factor of 1.965 (or 96.5 %).
+Keeping all variables constant, if customer purchase tax software, the odds ratio increases by a factor of 1.393 (or 39.3 %).
+
+```{r}
+final_result <- performance %>%
+  select(id) %>%
+  left_join(final_id)
+
+save(final_result, file = "Jiamei_Home_Xinyan_Lu_group4.rds" )
+
+```
+
+
